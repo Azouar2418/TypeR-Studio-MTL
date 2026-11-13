@@ -10629,7 +10629,7 @@
   /* -------------------------------- files --------------------------------- */
 
   const canPickFiles = typeof window.showOpenFilePicker === "function";
-  const OPEN_TYPES = [{ description: "Photoshop, InDesign, PNG, JPEG", accept: { "image/vnd.adobe.photoshop": [".psd", ".psb"], "application/vnd.adobe.indesign-idml-package": [".idml"], "application/x-indesign": [".indd", ".indt"], "image/png": [".png"], "image/jpeg": [".jpg", ".jpeg"], "image/webp": [".webp"], "application/octet-stream": [".atn", ".asl"] } }];
+  const OPEN_TYPES = [{ description: "Photoshop, InDesign, PNG, JPEG", accept: { "image/vnd.adobe.photoshop": [".psd", ".psb"], "application/vnd.adobe.indesign-idml-package": [".idml"], "application/x-indesign": [".indd", ".indt"], "image/png": [".png"], "image/jpeg": [".jpg", ".jpeg"], "image/webp": [".webp"], "application/octet-stream": [".atn", ".asl"], "application/vnd.comicbook+zip": [".cbz"], "application/zip": [".zip"] } }];
   const InDesign = window.TypeRInDesign;
 
   const tooLargeText = (width, height) => fill(T("This page is too large for this browser: {width} × {height} px."), { width, height });
@@ -10694,7 +10694,74 @@
     return fresh;
   };
 
+  // The text boxes an archive's chapter.json held, by page file name: each page, as it opens, gets
+  // one text layer per box, at the box's place, in its colours (see placeImportedBoxes)
+  let importedBoxes = null;
+  const boxesPlaced = new Set();
+  const placeImportedBoxes = async (doc, file) => {
+    const page = importedBoxes && importedBoxes[file.name];
+    if (!page || boxesPlaced.has(file.name) || !doc || !doc.width) return;
+    boxesPlaced.add(file.name);
+    // The page's picture may have been scaled since the boxes were measured on it
+    const scale = doc.width / page.width;
+    const typeSet = (text) => {
+      const color = text.fill || { r: 0, g: 0, b: 0 };
+      const size = Math.max(8, Math.round((text.size || 24) * scale));
+      const style = {
+        textProps: {
+          typeUnit: "pixelsUnit",
+          layerText: { textStyleRange: [{ from: 0, to: 0, textStyle: { fontPostScriptName: "WildjessNormal", fontName: "Wildjess", fontStyleName: "Normal", size, autoLeading: true, color: { red: color.r, green: color.g, blue: color.b } } }] },
+        },
+      };
+      if (text.outline) style.stroke = { enabled: true, size: Math.max(2, Math.round(size / 9)), opacity: 100, position: "outer", color: { r: text.outline.r, g: text.outline.g, b: text.outline.b } };
+      return style;
+    };
+    try {
+      if (app.doc !== doc) PS.setActiveDoc(doc);
+      const selections = page.texts.map((text) => ({
+        left: Math.max(0, text.left * scale),
+        top: Math.max(0, text.top * scale),
+        right: Math.min(doc.width, (text.left + text.width) * scale),
+        bottom: Math.min(doc.height, (text.top + text.height) * scale),
+      }));
+      const problem = await PS.host.createTextLayersInStoredSelections({ texts: page.texts.map((text) => text.text), selections, styles: page.texts.map(typeSet), padding: 0 });
+      if (problem) boxesPlaced.delete(file.name);
+      else toast(fill(T("{count} text layers added from the chapter's text boxes."), { count: page.texts.length }));
+    } catch (error) {
+      console.error(error);
+      boxesPlaced.delete(file.name);
+    }
+  };
+
+  // The archives among the entries (.cbz, or a .zip of pages) give their pages: a chapter. The text
+  // that came with them goes to the TypeR panel as a script, before the pages open, so the panel
+  // finds its page markers when the pages are linked.
+  const expandArchives = async (entries) => {
+    const unpacked = await window.TypeRChapterArchive.expand(entries, (kind, name, error) => {
+      if (kind === "reading") working(fill(T("Opening {name}…"), { name }));
+      else {
+        console.error(error);
+        toast(fill(T("Can't be read: {names}. These files are damaged, or aren't what their names say."), { names: name }), true);
+      }
+    });
+    working(null);
+    if (unpacked.boxes && unpacked.boxes !== entries.boxes) {
+      importedBoxes = unpacked.boxes;
+      boxesPlaced.clear();
+    }
+    if (unpacked.script && unpacked.script !== entries.script) {
+      try {
+        await importScript(unpacked.script);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    return unpacked;
+  };
+
   const openFiles = async (entries) => {
+    const unpacked = await expandArchives(entries);
+    if (unpacked.expanded) return openChapter(unpacked);
     if (!settleTransform()) return;
     const inOrder = Array.from(entries).sort((a, b) => NATURAL_ORDER.compare((a.file || a).name, (b.file || b).name));
     const opened = [];
@@ -10724,7 +10791,11 @@
           const doc = await reopenInTab(tab, file, handle);
           if (doc) opened.push(doc);
         } else if (InDesign.isInDesignName(file.name)) opened.push(...(await openInDesign(file, handle)));
-        else opened.push(await ops.openBlob(file, file.name, undefined, handle));
+        else {
+          const opening = await ops.openBlob(file, file.name, undefined, handle);
+          opened.push(opening);
+          await placeImportedBoxes(opening, file);
+        }
       } catch (error) {
         console.error(error);
         if (error.tooLarge) toast(tooLargeText(error.tooLarge.width, error.tooLarge.height), true);
@@ -10954,7 +11025,7 @@
   };
   // Open Pages…: the pages picked one by one, or a whole folder. Either way they make a chapter
   // (see openChapter), shared with the panel's Import pages.
-  const PAGE_TYPES = [{ description: "Photoshop, PNG, JPEG", accept: { "image/vnd.adobe.photoshop": [".psd", ".psb"], "image/png": [".png"], "image/jpeg": [".jpg", ".jpeg"], "image/webp": [".webp"] } }];
+  const PAGE_TYPES = [{ description: "Photoshop, PNG, JPEG", accept: { "image/vnd.adobe.photoshop": [".psd", ".psb"], "image/png": [".png"], "image/jpeg": [".jpg", ".jpeg"], "image/webp": [".webp"], "application/vnd.comicbook+zip": [".cbz"], "application/zip": [".zip"] } }];
   const pickPageFiles = async () => {
     if (!canPickFiles) {
       const input = document.createElement("input");
@@ -10962,7 +11033,7 @@
       input.multiple = true;
       // iOS greys out the PSDs as soon as there's a filter (see touch.js): what can't be opened
       // is refused once picked
-      if (!Shell.touch) input.accept = ".psd,.psb,.png,.jpg,.jpeg,.webp";
+      if (!Shell.touch) input.accept = ".psd,.psb,.png,.jpg,.jpeg,.webp,.cbz,.zip";
       input.addEventListener("change", () => openChapter(Array.from(input.files)));
       input.click();
       return;
@@ -11709,6 +11780,7 @@
   // A folder is a chapter: its pages wait in the pager, the first one opens. What isn't a page
   // (an InDesign file) opens as before.
   const openChapter = async (entries) => {
+    entries = await expandArchives(entries);
     const isPage = (entry) => PAGE_FILES.test((entry.file || entry).name);
     if (entries.filter(isPage).length < 2) {
       await openFiles(entries);
@@ -17529,11 +17601,15 @@
     const spot = showDropZones(event);
     hideDropZones();
     let entries = await entriesFromDrop(event);
-    const folder = entries.folder;
+    let folder = entries.folder;
     if (spot === "left" || spot === "right" || spot === "layer") {
       await addPictures(entries.filter(({ file }) => IS_PICTURE.test(file.type)), spot === "layer" ? addAsLayer : addAsPage(spot));
       entries = entries.filter(({ file }) => !IS_PICTURE.test(file.type));
     }
+    // A .cbz, or a .zip of pages, is a chapter; a style kit stays a .zip for the kits below
+    const unpacked = await expandArchives(entries);
+    if (unpacked.expanded) folder = true;
+    entries = unpacked;
     const fonts = entries.filter((entry) => /\.(ttf|otf|ttc|otc|woff2?)$/i.test(entry.file.name));
     if (fonts.length) {
       sayFonts(await Fonts.addFiles(fonts.map((entry) => entry.file)));

@@ -1,0 +1,53 @@
+# Publishes the web app on GitHub Pages: https://<user>.github.io/<repo>/
+# Once, in the repository's Settings > Pages, set Source to "GitHub Actions".
+# The folders keep the layout the app expects (web/ beside assets/, images/ and i18n.js, which
+# index.html reaches as ../assets/...), and the root page sends the visitor to web/.
+name: Publish on GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "assets/**"
+      - "images/**"
+      - "i18n.js"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the site folder
+        run: |
+          mkdir _site
+          cp -r web assets images i18n.js _site/
+          touch _site/.nojekyll
+          cat > _site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>TypeR Studio</title>
+          <meta http-equiv="refresh" content="0; url=web/">
+          <link rel="canonical" href="web/">
+          <a href="web/">TypeR Studio</a>
+          HTML
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

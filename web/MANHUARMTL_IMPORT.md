@@ -18,4 +18,4 @@ The TypeR Studio web build includes `mrm-import.js` from `index.html`.
 - Accounts for stitched offsets and per-page source-to-canvas scaling.
 - Missing ZIP images are reported without preventing the remaining pages from opening.
 
-The companion extractor source is supplied separately as `manhuarmtl-extractor-fixed.user.js`.
+The companion extractor userscript is provided as a separate installable file with this repair; it is not loaded by the TypeR Studio web page.

@@ -48,6 +48,19 @@
     return any ? out.join("\n") : null;
   };
 
+  // The font a text was set in: its first family that isn't a generic one ("Anime Ace", sans-serif
+  // is "Anime Ace"), and whether it is bold or italic. Null family when it names none.
+  const GENERIC = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-[a-z-]+|inherit|initial)$/i;
+  const fontOf = (computed) => {
+    const given = String((computed && computed.fontFamily) || "").split(",").map((name) => name.trim().replace(/^["']+|["']+$/g, "").trim());
+    const weight = String((computed && computed.fontWeight) || "");
+    return {
+      family: given.find((name) => name && !GENERIC.test(name)) || null,
+      bold: /^(bold|bolder)$/i.test(weight) || Number(weight) >= 600,
+      italic: /italic|oblique/i.test(String((computed && computed.fontStyle) || "")),
+    };
+  };
+
   const hex = /^#([0-9a-f]{6})$/i;
   const rgbOf = (value) => {
     const found = hex.exec(String(value || "").trim());
@@ -57,7 +70,7 @@
   };
 
   // The text boxes of chapter.json, by the name of the page file that holds them:
-  // { width, height, texts: [{ text, left, top, width, height, size, fill, outline }] }, the
+  // { width, height, texts: [{ text, left, top, width, height, size, fill, outline, kind, font }] }, the
   // lengths in pixels of the page's own picture, the colours as { r, g, b } or null.
   // `names` are the page files in the order of the pages; a page is found by its imageFilename,
   // or else by its place. Null when no page has a box with text.
@@ -96,6 +109,8 @@
           size: laid > 0 && across > 0 ? (laid * width) / across : 0,
           fill: rgbOf(one.color && one.color.fill),
           outline: rgbOf(one.color && one.color.outline),
+          kind: typeof one.kind === "string" ? one.kind : "",
+          font: fontOf(one.computed),
         });
       });
       if (!texts.length) return;

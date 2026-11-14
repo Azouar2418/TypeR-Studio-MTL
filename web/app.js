@@ -10698,6 +10698,27 @@
   // one text layer per box, at the box's place, in its colours (see placeImportedBoxes)
   let importedBoxes = null;
   const boxesPlaced = new Set();
+  // A font for each kind of bubble, once there is one: kindFonts.thought = { family: "…", bold: false }.
+  // Without one, a box keeps the font its text was set in.
+  const kindFonts = {};
+  // The font of an imported box: one of the fonts TypeR knows (the installed ones too, once
+  // listed) with the family of the box's font, in the bold or italic it was set in. A family
+  // that isn't there yet is still named, so the text takes it when the font is added.
+  const fontOfBox = (text) => {
+    const wanted = Object.assign({}, text.font, kindFonts[text.kind]);
+    if (!wanted.family) return { ps: "WildjessNormal", family: "Wildjess", style: "Normal" };
+    const squash = (name) => String(name || "").toLowerCase().replace(/[\s\-_.,]+/g, "");
+    const family = squash(wanted.family);
+    const styles = Fonts.list().filter((font) => squash(font.family) === family);
+    const looks = (font, pattern) => pattern.test(font.style || "");
+    const score = (font) =>
+      (looks(font, /bold|black|heavy/i) === Boolean(wanted.bold) ? 2 : 0) +
+      (looks(font, /italic|oblique/i) === Boolean(wanted.italic) ? 2 : 0) +
+      (looks(font, /regular|normal|book|roman|medium/i) ? 1 : 0);
+    const best = styles.slice().sort((a, b) => score(b) - score(a))[0];
+    if (best) return { ps: best.postScriptName, family: best.family, style: best.style };
+    return { ps: "", family: wanted.family, style: wanted.bold ? (wanted.italic ? "Bold Italic" : "Bold") : wanted.italic ? "Italic" : "Regular" };
+  };
   const placeImportedBoxes = async (doc, file) => {
     const page = importedBoxes && importedBoxes[file.name];
     if (!page || boxesPlaced.has(file.name) || !doc || !doc.width) return;
@@ -10705,12 +10726,13 @@
     // The page's picture may have been scaled since the boxes were measured on it
     const scale = doc.width / page.width;
     const typeSet = (text) => {
+      const face = fontOfBox(text);
       const color = text.fill || { r: 0, g: 0, b: 0 };
       const size = Math.max(8, Math.round((text.size || 24) * scale));
       const style = {
         textProps: {
           typeUnit: "pixelsUnit",
-          layerText: { textStyleRange: [{ from: 0, to: 0, textStyle: { fontPostScriptName: "WildjessNormal", fontName: "Wildjess", fontStyleName: "Normal", size, autoLeading: true, color: { red: color.r, green: color.g, blue: color.b } } }] },
+          layerText: { textStyleRange: [{ from: 0, to: 0, textStyle: { fontPostScriptName: face.ps, fontName: face.family, fontStyleName: face.style, size, autoLeading: true, color: { red: color.r, green: color.g, blue: color.b } } }] },
         },
       };
       if (text.outline) style.stroke = { enabled: true, size: Math.max(2, Math.round(size / 9)), opacity: 100, position: "outer", color: { r: text.outline.r, g: text.outline.g, b: text.outline.b } };
@@ -11754,7 +11776,7 @@
       if (pageOf(app.doc) !== target) return;
       chapter.at = target;
       // Kept open: a page with changes to save, or saved only as a download
-      if (left && left !== app.doc && app.docs.includes(left) && !savingDocs.has(left) && !PS.isDirty(left) && (left.handle || left.historyIndex === 0)) {
+      if (left && !chapter.keepOpen && left !== app.doc && app.docs.includes(left) && !savingDocs.has(left) && !PS.isDirty(left) && (left.handle || left.historyIndex === 0)) {
         if (left.handle) chapter.pages[at].handle = left.handle;
         ops.closeDoc(left);
       }
@@ -11779,6 +11801,28 @@
   };
   // A folder is a chapter: its pages wait in the pager, the first one opens. What isn't a page
   // (an InDesign file) opens as before.
+  // Every page after the first, opened in order; the first is the one shown at the end. A page
+  // that can't be read is said and skipped.
+  const openRestOfChapter = async () => {
+    const book = chapter;
+    book.keepOpen = true;
+    try {
+      for (let index = 1; index < book.pages.length && chapter === book; index++) {
+        working(fill(T("Opening page {at} of {count}…"), { at: index + 1, count: book.pages.length }));
+        const page = book.pages[index];
+        if (app.docs.some((doc) => doc.path === pageKey(page))) continue;
+        await openFiles([{ file: page.file, handle: page.handle }]);
+      }
+    } finally {
+      working(null);
+    }
+    if (chapter === book) {
+      const first = app.docs.find((doc) => doc.path === pageKey(book.pages[0]));
+      if (first) switchDoc(first);
+    }
+    renderStatus();
+  };
+
   const openChapter = async (entries) => {
     entries = await expandArchives(entries);
     const isPage = (entry) => PAGE_FILES.test((entry.file || entry).name);
@@ -11786,10 +11830,13 @@
       await openFiles(entries);
       return;
     }
+    // The pages of an archive all open, one tab each, and stay open as the reader moves on
+    const fromArchive = Boolean(entries.expanded);
     setPages(entries.filter(isPage));
     await goToPage(0);
     const bridge = panelBridge();
     if (bridge && chapter) bridge.importPages(chapter.pages.map((page) => page.file));
+    if (fromArchive && chapter) await openRestOfChapter();
     const others = entries.filter((entry) => !isPage(entry));
     if (others.length) await openFiles(others);
   };
@@ -17619,6 +17666,7 @@
     const toolbar = entries.find((entry) => /\.tbr$/i.test(entry.file.name));
     if (toolbar) importToolbar(toolbar.file);
     const pages = entries.filter((entry) => !/\.(ttf|otf|ttc|otc|woff2?|zip|json|tbr)$/i.test(entry.file.name));
+    if (unpacked.expanded) pages.expanded = true;
     if (pages.length) (folder ? openChapter(pages) : openFiles(pages));
   });
 

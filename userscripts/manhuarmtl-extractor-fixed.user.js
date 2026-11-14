@@ -128,7 +128,11 @@
         // is ~268M pixels (16384x16384), Safari's is much lower (~16M). We
         // stay under 100M so a single stitched PNG works everywhere; if the
         // chapter is bigger we split into multiple stitched images.
-        maxStitchPixels: 100000000
+        maxStitchPixels: 100000000,
+        // Pixel budgets alone are insufficient: browsers also impose a hard
+        // maximum width/height for a canvas (Safari is notably stricter).
+        // Keep stitched pages within a conservative cross-browser dimension.
+        maxStitchDimension: 16384
     };
 
     // ------------------------------------------------------------------
@@ -624,23 +628,26 @@
             var incW = mode === 'horizontal' ? it.w : maxW;
             var incH = mode === 'vertical' ? it.h : maxH;
 
-            // Pixels this page would add to the current chunk.
-            var addPixels;
-            if (mode === 'vertical') {
-                addPixels = maxW * it.h;
-            } else {
-                addPixels = it.w * maxH;
-            }
+            // A canvas has BOTH a total-pixel budget and independent width /
+            // height limits. Checking only pixels allowed extremely tall/wide
+            // chapter canvases (e.g. 1280 x 80,000) that browsers cannot encode.
+            // Split before either limit is crossed so an early chunk cannot fail
+            // while a later, smaller chunk succeeds.
+            var maxDimension = CFG.maxStitchDimension || 16384;
+            var exceedsPixelBudget = current && (
+                mode === 'vertical'
+                    ? current.width * (current.cumH + it.h) > CFG.maxStitchPixels
+                    : (current.cumW + it.w) * current.height > CFG.maxStitchPixels
+            );
+            var exceedsDimension = current && (
+                mode === 'vertical'
+                    ? (current.width > maxDimension || current.cumH + it.h > maxDimension)
+                    : (current.cumW + it.w > maxDimension || current.height > maxDimension)
+            );
 
-            var currentPixels = current
-                ? (current.width * (current.height + (mode === 'vertical' ? it.h : 0))) ||
-                  (current.width * current.height)
-                : 0;
-
-            // Start a new chunk if this page would overflow the budget.
-            if (!current ||
-                (mode === 'vertical' && (current.width * (current.cumH + it.h)) > CFG.maxStitchPixels) ||
-                (mode === 'horizontal' && ((current.cumW + it.w) * current.height) > CFG.maxStitchPixels)) {
+            // Start a new chunk before adding a page that would exceed either
+            // browser canvas constraint.
+            if (!current || exceedsPixelBudget || exceedsDimension) {
                 if (current) chunks.push(current);
                 current = {
                     items: [],

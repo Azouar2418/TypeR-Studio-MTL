@@ -10703,6 +10703,25 @@
   const kindFonts = {};
   // Whether an imported box keeps the font its text was set in (the dialog of Import Chapter ZIP can say no)
   let importFonts = true;
+  // How the text layers of an import look: "file" (the fonts and sizes of the file), or "panel"
+  // (TypeR's own styles, as the panel keeps them: the style named for the kind of bubble, else the
+  // one chosen in the panel)
+  let importLook = "file";
+  const panelStyles = () => {
+    try {
+      const data = JSON.parse(window.TypeRKit.read(window.TypeRKit.activeStoragePath()) || "{}");
+      return { styles: Array.isArray(data.styles) ? data.styles.filter((style) => style && style.textProps) : [], current: data.currentStyleId || null };
+    } catch (error) {
+      return { styles: [], current: null };
+    }
+  };
+  // The style a kind of bubble takes: the panel's style whose name has the kind's word
+  // ("dialogue", "thought", "narration", "sfx", "sign"), else the style chosen in the panel, else its first
+  const panelStyleFor = (panel, kind) => {
+    const word = squashName(String(kind || "").split(/[_\s-]+/)[0]);
+    const named = word && panel.styles.find((style) => squashName(style.name).includes(word));
+    return named || panel.styles.find((style) => style.id === panel.current) || panel.styles[0] || null;
+  };
   const squashName = (name) => String(name || "").toLowerCase().replace(/[\s\-_.,]+/g, "");
   const hasFontFamily = (family) => Fonts.list().some((font) => squashName(font.family) === squashName(family));
   // The font of an imported box: one of the fonts TypeR knows (the installed ones too, once
@@ -10728,7 +10747,10 @@
     boxesPlaced.add(file.name);
     // The page's picture may have been scaled since the boxes were measured on it
     const scale = doc.width / page.width;
+    const panel = importLook === "panel" ? panelStyles() : null;
     const typeSet = (text) => {
+      const own = panel && panelStyleFor(panel, text.kind);
+      if (own) return JSON.parse(JSON.stringify(own));
       const face = fontOfBox(text);
       const color = text.fill || { r: 0, g: 0, b: 0 };
       const size = Math.max(8, Math.round((text.size || 24) * scale));
@@ -10773,6 +10795,7 @@
     if (unpacked.boxes && unpacked.boxes !== entries.boxes) {
       importedBoxes = unpacked.boxes;
       importFonts = true;
+      importLook = "file";
       boxesPlaced.clear();
     }
     if (unpacked.script && unpacked.script !== entries.script) {
@@ -11158,25 +11181,44 @@
         body.appendChild(row);
       });
     }
+    // TypeR's styles: what each kind of bubble in the file would take
+    const panel = panelStyles();
+    const withStyles = panel.styles.length > 0;
+    const kindStyles = () => {
+      if (!withStyles) return T("TypeR has no styles yet: make one in its panel first.");
+      const kinds = Array.from(new Set(Object.values(boxes).flatMap((page) => page.texts.map((text) => text.kind || ""))));
+      return kinds.map((kind) => `${kind || T("(no kind)")} → ${panelStyleFor(panel, kind).name}`).join("  ·  ");
+    };
     const answer = await dialog({
       title: found.name || picked.file.name,
       body,
       ok: T("Import"),
       fields: [
         { id: "all", label: T("Open every page now"), type: "checkbox", checked: true },
-        { id: "boxes", label: T("Add the text boxes as text layers"), type: "checkbox", checked: total > 0 },
-        { id: "fonts", label: T("Set them in the fonts of the file"), type: "checkbox", checked: families.size > 0 },
+        {
+          id: "look",
+          label: T("Text layers"),
+          value: total && withStyles ? "panel" : total ? "file" : "none",
+          options: [["file", T("In the fonts of the file")], ["panel", T("In TypeR's styles")], ["none", T("None: paste with TypeR")]],
+          hint: (value) => (value === "panel" ? kindStyles() : value === "none" ? T("The pages and the script are brought in; TypeR pastes the lines as you click the bubbles.") : T("One text layer per box, at its place, in its font, size and colours.")),
+        },
         { id: "script", label: T("Send the script to the TypeR panel"), type: "checkbox", checked: Boolean(found.script) },
       ],
       ready: (inputs) => {
-        if (!total) inputs.boxes.disabled = inputs.fonts.disabled = true;
+        const option = (value) => inputs.look.querySelector(`option[value="${value}"]`);
+        if (!total) {
+          option("file").disabled = true;
+          option("panel").disabled = true;
+        }
+        if (!withStyles) option("panel").disabled = true;
         if (!found.script) inputs.script.disabled = true;
       },
     });
     if (!answer) return;
-    const useBoxes = answer.boxes && total > 0;
+    const useBoxes = answer.look !== "none" && total > 0;
     importedBoxes = useBoxes ? boxes : null;
-    importFonts = Boolean(answer.fonts);
+    importLook = answer.look === "panel" && withStyles ? "panel" : "file";
+    importFonts = importLook === "file";
     boxesPlaced.clear();
     if (answer.script && found.script) {
       try {

@@ -770,8 +770,14 @@
                         var layout = Object.assign({}, originalText.layout || {});
                         var oldPageWidth = Number(layout.pageWidth) || 0;
                         var oldBaseSize = Number(layout.baseFontSize) || 0;
-                        if (oldPageWidth > 0 && oldBaseSize > 0 && sourceWidth > 0) {
-                            layout.baseFontSize = oldBaseSize * sourceWidth / oldPageWidth * scaleX;
+                        var computedSize = Number(originalText.computed && originalText.computed.fontSize) || 0;
+                        var sourceFontSize = oldBaseSize > 0 ? oldBaseSize : computedSize;
+                        if (sourceFontSize > 0) {
+                            // Both baseFontSize and computed.fontSize are CSS
+                            // pixels. Convert them to source-image pixels, then
+                            // bind the layout to the merged image width.
+                            layout.baseFontSize = sourceFontSize *
+                                (oldPageWidth > 0 ? sourceWidth / oldPageWidth : 1) * scaleX;
                             layout.pageWidth = chunk.width;
                         }
                         text.layout = layout;

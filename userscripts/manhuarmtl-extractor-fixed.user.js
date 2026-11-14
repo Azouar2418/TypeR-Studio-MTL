@@ -707,78 +707,124 @@
     // ------------------------------------------------------------------
     async function buildZip(pages, meta) {
         var zip = new JSZip();
-
-        // Images folder
         var imgFolder = zip.folder('images');
-
-        // Track which pages failed so we can report them in the manifest and
-        // in the UI, instead of aborting the whole extraction.
         var failedPages = [];
-        var imageSources = {};  // pageFilename -> 'v9-canvas' | 'shadow-canvas' | ...
+        var imageSources = {};
+        var writtenStitchedImages = [];
+        var outputPages = pages;
 
-        // --- Image output ---
-        // In 'separate' mode we write one PNG per page (the original behaviour).
-        // In 'vertical' / 'horizontal' mode we stitch pages into one (or a few,
-        // if the chapter exceeds the browser's canvas budget) big PNG, then
-        // patch each page's imageFilename + stitchedOffset so the consumer can
-        // still find the page inside the stitched image.
+        // A stitched image is a real TypeR page, not a collection of source
+        // pages pointing at the same file. Move every text box into the
+        // stitched image's coordinate space before writing chapter.json.
         var stitchedChunks = [];
         if (stitchMode !== 'separate') {
             stitchedChunks = stitchCanvases(allCanvases(), stitchMode);
         }
 
         if (stitchedChunks.length) {
-            // Write each chunk as stitched-NNN.png and record where every page
-            // landed inside it.
+            outputPages = [];
+
             for (var ci = 0; ci < stitchedChunks.length; ci++) {
                 var chunk = stitchedChunks[ci];
-                var chunkName = 'stitched-' + String(ci + 1).padStart(3, '0') + '.png';
-                // Use extractCanvasImage on the stitched canvas so we get the
-                // shadow-canvas fallback if the stitched canvas itself is
-                // somehow tainted.
+                var pageName = 'page-' + String(ci + 1).padStart(3, '0') + '.png';
+
                 try {
                     var imgResult = await extractCanvasImage(chunk.canvas);
-                    var blob = imgResult.blob;
-                    var b64 = await blobToBase64(blob);
-                    imgFolder.file(chunkName, b64, { base64: true });
-                    imageSources[chunkName] = imgResult.source;
+                    var b64 = await blobToBase64(imgResult.blob);
+                    imgFolder.file(pageName, b64, { base64: true });
+                    imageSources[pageName] = imgResult.source;
                 } catch (e) {
                     console.error('[MRM Extractor] stitched chunk ' + ci + ' failed:', e);
                     failedPages.push({ chunk: ci, error: e.message, pages: chunk.pageIndices });
-                    // Skip this chunk — pages in it will have no image.
                     continue;
                 }
 
-                // Patch every page that belongs to this chunk.
+                var mergedTexts = [];
+                var sourcePageIndexes = [];
+
                 for (var pi = 0; pi < chunk.pageIndices.length; pi++) {
                     var pageIndex = chunk.pageIndices[pi];
-                    var pageEntry = pages[pageIndex];
-                    if (!pageEntry) continue;
-                    var off = chunk.offsets[pi];
-                    var srcCanvas = allCanvases()[pageIndex];
-                    pageEntry.imageFilename = chunkName;
-                    pageEntry.stitchedChunkIndex = ci;
-                    pageEntry.stitchedOffset = {
-                        x: off.x,
-                        y: off.y
-                    };
-                    // Real pixel size of the page inside the stitched canvas.
-                    pageEntry.canvasWidth = srcCanvas.width;
-                    pageEntry.canvasHeight = srcCanvas.height;
-                    pageEntry.imageSource = imageSources[chunkName];
+                    var sourcePage = pages.find(function (p) { return p.index === pageIndex; });
+                    var sourceCanvas = allCanvases()[pageIndex];
+                    if (!sourcePage || !sourceCanvas) continue;
+
+                    var offset = chunk.offsets[pi];
+                    var sourceWidth = Number(sourcePage.width) || sourceCanvas.width;
+                    var sourceHeight = Number(sourcePage.height) || sourceCanvas.height;
+                    var scaleX = sourceCanvas.width / sourceWidth;
+                    var scaleY = sourceCanvas.height / sourceHeight;
+
+                    sourcePageIndexes.push(pageIndex);
+
+                    (sourcePage.texts || []).forEach(function (originalText) {
+                        var text = Object.assign({}, originalText);
+                        var box = originalText.box || {};
+                        text.box = {
+                            x: Math.round((Number(box.x) || 0) * scaleX + offset.x),
+                            y: Math.round((Number(box.y) || 0) * scaleY + offset.y),
+                            w: Math.round((Number(box.w) || 0) * scaleX),
+                            h: Math.round((Number(box.h) || 0) * scaleY)
+                        };
+
+                        // TypeR derives pixel font size from baseFontSize *
+                        // page.width / pageWidth. Rebase those two values so
+                        // the font remains the same physical size on the
+                        // larger stitched page.
+                        var layout = Object.assign({}, originalText.layout || {});
+                        var oldPageWidth = Number(layout.pageWidth) || 0;
+                        var oldBaseSize = Number(layout.baseFontSize) || 0;
+                        if (oldPageWidth > 0 && oldBaseSize > 0 && sourceWidth > 0) {
+                            layout.baseFontSize = oldBaseSize * sourceWidth / oldPageWidth * scaleX;
+                            layout.pageWidth = chunk.width;
+                        }
+                        text.layout = layout;
+
+                        if (text.computed && Number.isFinite(Number(text.computed.fontSize))) {
+                            text.computed = Object.assign({}, text.computed, {
+                                fontSize: Number(text.computed.fontSize) * scaleX
+                            });
+                        }
+                        mergedTexts.push(text);
+                    });
                 }
+
+                // The manifest now has one ordinary page entry per stitched
+                // PNG. No stitchedOffset or second-pass coordinate handling
+                // is required by TypeR.
+                outputPages.push({
+                    index: outputPages.length,
+                    sourceFilename: sourcePageIndexes.map(function (index) {
+                        var p = pages.find(function (item) { return item.index === index; });
+                        return p ? p.sourceFilename : '';
+                    }).filter(Boolean).join(', '),
+                    imageFilename: pageName,
+                    width: chunk.width,
+                    height: chunk.height,
+                    textCount: mergedTexts.length,
+                    texts: mergedTexts,
+                    sourcePageIndexes: sourcePageIndexes,
+                    imageSource: imageSources[pageName]
+                });
+
+                writtenStitchedImages.push({
+                    filename: pageName,
+                    width: chunk.width,
+                    height: chunk.height,
+                    pageIndexes: sourcePageIndexes
+                });
             }
         } else {
-            // Separate mode: one PNG per page, with shadow-canvas fallback.
+            // Original, unstitched export: one image and one manifest page
+            // per source page.
             for (var i = 0; i < pages.length; i++) {
                 var p = pages[i];
                 var canvas = allCanvases()[p.index];
                 if (!canvas || canvas.dataset.mrmReady !== '1') continue;
                 try {
-                    var result2 = await extractCanvasImage(canvas);
-                    var b642 = await blobToBase64(result2.blob);
-                    imgFolder.file(p.imageFilename, b642, { base64: true });
-                    p.imageSource = result2.source;
+                    var result = await extractCanvasImage(canvas);
+                    var pageB64 = await blobToBase64(result.blob);
+                    imgFolder.file(p.imageFilename, pageB64, { base64: true });
+                    p.imageSource = result.source;
                 } catch (e) {
                     console.error('[MRM Extractor] page ' + (p.index + 1) + ' failed:', e);
                     failedPages.push({ page: p.index, error: e.message });
@@ -787,10 +833,9 @@
             }
         }
 
-        // Full manifest (with text boxes, styles, colors, fonts)
         var translatedCount = 0;
         var totalTexts = 0;
-        pages.forEach(function (p) {
+        outputPages.forEach(function (p) {
             (p.texts || []).forEach(function (t) {
                 totalTexts++;
                 if (t.isTranslated) translatedCount++;
@@ -805,11 +850,7 @@
             url: location.href,
             extractedAt: new Date().toISOString(),
             userAgent: navigator.userAgent,
-            pageCount: pages.length,
-            // The language the user chose for display in TypeR Studio / viewer.
-            // 'en' = English source, 'ar' = Arabic translation, 'bi' = bilingual.
-            // The importer reads this and uses displayField to pick the right
-            // text from each entry.
+            pageCount: outputPages.length,
             targetLang: targetLang,
             displayField: primaryFieldFor(targetLang),
             translation: {
@@ -817,36 +858,17 @@
                 active: translatedCount > 0,
                 translatedTexts: translatedCount,
                 totalTexts: totalTexts,
-                // Warn the consumer if the user asked for Arabic but the
-                // browser translator did not actually run.
                 insufficient: targetLang === 'ar' && translatedCount < Math.ceil(totalTexts / 2)
             },
-            // Stitch mode: 'separate' (one PNG per page), 'vertical' (pages
-            // stacked top-to-bottom), or 'horizontal' (side-by-side). When
-            // stitched, each page's imageFilename points at the stitched PNG
-            // and stitchedOffset tells the consumer where the page lives
-            // inside it. Box coordinates stay in source-image pixels; convert
-            // to stitched-image pixels with:
-            //   absX = box.x * (canvasWidth / width) + stitchedOffset.x
-            //   absY = box.y * (canvasHeight / height) + stitchedOffset.y
             stitchMode: stitchMode,
-            stitchedImages: stitchedChunks.map(function (c, i) {
-                return {
-                    filename: 'stitched-' + String(i + 1).padStart(3, '0') + '.png',
-                    width: c.width,
-                    height: c.height,
-                    pageIndexes: c.pageIndices
-                };
-            }),
-            // Record which pages / chunks we could not extract (canvas tainted
-            // and no shadow canvas available). The consumer can warn the user
-            // and the typesetter knows to re-extract those pages.
+            stitchedImages: writtenStitchedImages,
             failedPages: failedPages,
-            pages: pages
+            pages: outputPages
         };
         zip.file('chapter.json', JSON.stringify(manifest, null, 2));
 
-        // Plain-text script: uses displayText, which is built from targetLang.
+        // TypeR reads the manifest's page/text structure. Keep the plain-text
+        // companion in exactly the same page grouping and reading order.
         var lines = [];
         lines.push('# ' + meta.title);
         lines.push('# Source: ' + location.href);
@@ -859,9 +881,9 @@
             lines.push('#          on the chapter page, wait for the overlays to flip, then re-extract.');
         }
         lines.push('');
-        pages.forEach(function (p) {
-            lines.push('=== Page ' + (p.index + 1) + ' ===');
-            p.texts.forEach(function (t, i) {
+        outputPages.forEach(function (p, pageAt) {
+            lines.push('=== Page ' + (pageAt + 1) + ' ===');
+            (p.texts || []).forEach(function (t, i) {
                 var tag = t.kind ? ('[' + t.kind + ']') : '[text]';
                 lines.push((i + 1) + '. ' + tag + ' ' + (t.displayText || t.sourceText || ''));
             });
@@ -869,16 +891,15 @@
         });
         zip.file('script.txt', lines.join('\n'));
 
-        // Bilingual side-by-side script — always generated, useful as a
-        // proofreading reference even when targetLang is EN or AR.
+        // Bilingual side-by-side proofreading reference.
         {
             var bi = [];
             bi.push('# ' + meta.title + ' (bilingual reference)');
             bi.push('# source | translated');
             bi.push('');
-            pages.forEach(function (p) {
-                bi.push('=== Page ' + (p.index + 1) + ' ===');
-                p.texts.forEach(function (t, i) {
+            outputPages.forEach(function (p, pageAt) {
+                bi.push('=== Page ' + (pageAt + 1) + ' ===');
+                (p.texts || []).forEach(function (t, i) {
                     bi.push((i + 1) + '. EN: ' + (t.sourceText || ''));
                     bi.push('   AR: ' + (t.isTranslated ? t.text : '(untranslated)'));
                 });
@@ -887,24 +908,21 @@
             zip.file('script-bilingual.txt', bi.join('\n'));
         }
 
-        // Per-page CSS snippet for TypeR styles.js (so a typesetter can import
-        // a style that matches the source lettering).
         var cssLines = [];
         cssLines.push('/* Auto-generated from ' + meta.title + ' */');
-        pages.forEach(function (p) {
-            p.texts.forEach(function (t, i) {
+        outputPages.forEach(function (p, pageAt) {
+            (p.texts || []).forEach(function (t, i) {
                 if (!t.computed) return;
-                var sel = '.page-' + (p.index + 1) + '-text-' + (i + 1);
+                var sel = '.page-' + (pageAt + 1) + '-text-' + (i + 1);
                 cssLines.push(sel + ' {');
                 cssLines.push('  font-family: ' + t.computed.fontFamily + ';');
-                cssLines.push('  font-size: ' + (t.layout.baseFontSize || t.computed.fontSize) + 'px;');
+                cssLines.push('  font-size: ' + ((t.layout && t.layout.baseFontSize) || t.computed.fontSize) + 'px;');
                 cssLines.push('  font-weight: ' + t.computed.fontWeight + ';');
                 cssLines.push('  font-style: ' + t.computed.fontStyle + ';');
                 if (t.computed.textTransform && t.computed.textTransform !== 'none')
                     cssLines.push('  text-transform: ' + t.computed.textTransform + ';');
-                if (t.color.fill) cssLines.push('  color: ' + t.color.fill + ';');
+                if (t.color && t.color.fill) cssLines.push('  color: ' + t.color.fill + ';');
                 if (t.stroke) cssLines.push('  -webkit-text-stroke: ' + t.stroke.size + 'px ' + t.stroke.color + ';');
-                // RTL for Arabic text so the typesetter doesn't have to flip it.
                 if (t.dir === 'rtl') {
                     cssLines.push('  direction: rtl;');
                     cssLines.push('  unicode-bidi: embed;');
@@ -914,24 +932,22 @@
         });
         zip.file('styles.css', cssLines.join('\n'));
 
-        // README
         zip.file('README.txt', [
             meta.title,
             '================',
             '',
             'Extracted from: ' + location.href,
-            'Pages: ' + pages.length,
+            'Pages: ' + outputPages.length,
             '',
             'Files:',
-            '  images/page-NNN.png   - raw page images (decrypted canvases)',
-            '  chapter.json           - full manifest with text boxes, styles, colors',
-            '  script.txt             - plain-text translation per page',
+            '  images/page-NNN.png   - exported chapter pages (stitched when selected)',
+            '  chapter.json           - full manifest with final text-box coordinates',
+            '  script.txt             - plain-text translation grouped by exported page',
             '  styles.css             - CSS rules matching the source lettering',
             '',
             'Import into TypeR Studio:',
-            '  1. Open the images/ folder as a chapter (drag-drop the PNGs).',
-            '  2. Use chapter.json as a reference for text positions and styles.',
-            '  3. Paste from script.txt into the TypeR panel.',
+            '  1. Open the ZIP/CBZ as a chapter; TypeR reads the images and chapter.json.',
+            '  2. Text boxes are already expressed in each exported image coordinate space.',
             '',
             'Standalone viewer:',
             '  Open mtl-reference-viewer.html and drop the ZIP onto it.',

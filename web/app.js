@@ -10701,15 +10701,18 @@
   // A font for each kind of bubble, once there is one: kindFonts.thought = { family: "…", bold: false }.
   // Without one, a box keeps the font its text was set in.
   const kindFonts = {};
+  // Whether an imported box keeps the font its text was set in (the dialog of Import Chapter ZIP can say no)
+  let importFonts = true;
+  const squashName = (name) => String(name || "").toLowerCase().replace(/[\s\-_.,]+/g, "");
+  const hasFontFamily = (family) => Fonts.list().some((font) => squashName(font.family) === squashName(family));
   // The font of an imported box: one of the fonts TypeR knows (the installed ones too, once
   // listed) with the family of the box's font, in the bold or italic it was set in. A family
   // that isn't there yet is still named, so the text takes it when the font is added.
   const fontOfBox = (text) => {
-    const wanted = Object.assign({}, text.font, kindFonts[text.kind]);
+    const wanted = Object.assign({}, importFonts ? text.font : null, kindFonts[text.kind]);
     if (!wanted.family) return { ps: "WildjessNormal", family: "Wildjess", style: "Normal" };
-    const squash = (name) => String(name || "").toLowerCase().replace(/[\s\-_.,]+/g, "");
-    const family = squash(wanted.family);
-    const styles = Fonts.list().filter((font) => squash(font.family) === family);
+    const family = squashName(wanted.family);
+    const styles = Fonts.list().filter((font) => squashName(font.family) === family);
     const looks = (font, pattern) => pattern.test(font.style || "");
     const score = (font) =>
       (looks(font, /bold|black|heavy/i) === Boolean(wanted.bold) ? 2 : 0) +
@@ -10769,6 +10772,7 @@
     working(null);
     if (unpacked.boxes && unpacked.boxes !== entries.boxes) {
       importedBoxes = unpacked.boxes;
+      importFonts = true;
       boxesPlaced.clear();
     }
     if (unpacked.script && unpacked.script !== entries.script) {
@@ -11079,6 +11083,112 @@
     if (!answer) return;
     if (answer.also) openFolder();
     else pickPageFiles();
+  };
+
+  // File > Import Chapter ZIP…: the archive is read and said first (its pages, text boxes, script and
+  // fonts), and what is brought in is the reader's to choose: which parts, and whether every page
+  // opens now or one at a time with the pager.
+  const pickChapterArchive = async () => {
+    if (!canPickFiles) {
+      return new Promise((resolve) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".zip,.cbz";
+        input.addEventListener("change", () => resolve(input.files[0] ? { file: input.files[0], handle: null } : null));
+        input.addEventListener("cancel", () => resolve(null));
+        input.click();
+      });
+    }
+    try {
+      const [handle] = await window.showOpenFilePicker({ id: "typer-chapter-zip", types: [{ description: T("Chapter archive"), accept: { "application/zip": [".zip"], "application/vnd.comicbook+zip": [".cbz"] } }] });
+      return { file: await handle.getFile(), handle };
+    } catch (error) {
+      if (error.name !== "AbortError") throw error;
+      return null;
+    }
+  };
+  const importChapterArchive = async () => {
+    const picked = await pickChapterArchive();
+    if (!picked) return;
+    let found;
+    try {
+      working(fill(T("Opening {name}…"), { name: picked.file.name }));
+      found = await window.TypeRChapterArchive.read(picked.file);
+    } catch (error) {
+      console.error(error);
+      toast(fill(T("Can't be read: {names}. These files are damaged, or aren't what their names say."), { names: picked.file.name }), true);
+      return;
+    } finally {
+      working(null);
+    }
+    if (!found.files) {
+      toast(fill(T("There is no PSD, PNG, JPEG or WebP in {name}."), { name: picked.file.name }), true);
+      return;
+    }
+    const boxes = found.boxes || {};
+    const boxCount = (file) => (boxes[file.name] ? boxes[file.name].texts.length : 0);
+    const total = found.files.reduce((sum, file) => sum + boxCount(file), 0);
+    const scriptLines = found.script ? found.script.split("\n").filter((line) => !/^Page \d+$/.test(line)).length : 0;
+    const families = new Map();
+    Object.values(boxes).forEach((page) => page.texts.forEach((text) => text.font && text.font.family && families.set(text.font.family, (families.get(text.font.family) || 0) + 1)));
+
+    const body = document.createElement("div");
+    const line = (text) => {
+      const p = document.createElement("p");
+      p.textContent = text;
+      body.appendChild(p);
+      return p;
+    };
+    line(fill(T("{pages} pages · {boxes} text boxes · {lines} script lines"), { pages: found.files.length, boxes: total, lines: scriptLines }));
+    line(T("With Open every page off, the pages open one at a time with ‹ ›."));
+    const list = document.createElement("div");
+    list.style.cssText = "max-height:150px;overflow:auto;font-size:12px;line-height:1.6;padding:4px 8px;border:1px solid var(--line, #444);border-radius:4px;margin:6px 0";
+    found.files.forEach((file) => {
+      const row = document.createElement("div");
+      row.textContent = `${file.name} · ${boxCount(file) === 1 ? T("1 text box") : fill(T("{count} text boxes"), { count: boxCount(file) })}`;
+      list.appendChild(row);
+    });
+    body.appendChild(list);
+    if (families.size) {
+      line(T("Fonts of the file:"));
+      families.forEach((count, family) => {
+        const row = document.createElement("div");
+        row.style.cssText = "font-size:12px";
+        row.textContent = `${hasFontFamily(family) ? "✓" : "✗"} ${family} (${count}) — ${hasFontFamily(family) ? T("available") : T("not available: use Installed Fonts, or add its file")}`;
+        body.appendChild(row);
+      });
+    }
+    const answer = await dialog({
+      title: found.name || picked.file.name,
+      body,
+      ok: T("Import"),
+      fields: [
+        { id: "all", label: T("Open every page now"), type: "checkbox", checked: true },
+        { id: "boxes", label: T("Add the text boxes as text layers"), type: "checkbox", checked: total > 0 },
+        { id: "fonts", label: T("Set them in the fonts of the file"), type: "checkbox", checked: families.size > 0 },
+        { id: "script", label: T("Send the script to the TypeR panel"), type: "checkbox", checked: Boolean(found.script) },
+      ],
+      ready: (inputs) => {
+        if (!total) inputs.boxes.disabled = inputs.fonts.disabled = true;
+        if (!found.script) inputs.script.disabled = true;
+      },
+    });
+    if (!answer) return;
+    const useBoxes = answer.boxes && total > 0;
+    importedBoxes = useBoxes ? boxes : null;
+    importFonts = Boolean(answer.fonts);
+    boxesPlaced.clear();
+    if (answer.script && found.script) {
+      try {
+        await importScript({ text: found.script, name: found.name || picked.file.name.replace(/\.(cbz|zip)$/i, "") });
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    const entries = found.files.map((file) => ({ file, handle: null }));
+    entries.expanded = Boolean(answer.all);
+    await openChapter(entries);
+    toast(fill(T("Imported {pages} pages{boxes}{script}."), { pages: found.files.length, boxes: useBoxes ? ` · ${total} ${T("text boxes")}` : "", script: answer.script && found.script ? ` · ${T("script")}` : "" }));
   };
 
   const openRecentFile = async (row) => {
@@ -15896,6 +16006,7 @@
       { label: "New…", keys: DESKTOP ? "Cmd+N" : "Alt+Cmd+N", action: newDocument },
       { label: "Open…", keys: "Cmd+O", action: openDialog },
       { label: "Open Pages…", id: "Open Folder…", keys: "Shift+Cmd+O", action: openPages },
+      { label: "Import Chapter ZIP…", action: importChapterArchive },
       { label: "Open Recent…", enabled: () => Recent.available, action: showRecentFiles },
       null,
       { label: "Close", keys: DESKTOP ? "Cmd+W" : "Alt+Cmd+W", enabled: hasDoc, action: () => closeDoc() },
@@ -18415,6 +18526,7 @@
     view,
     viewChanged,
     openDialog,
+    importChapterArchive,
     openFiles,
     setPages,
     openChapter,

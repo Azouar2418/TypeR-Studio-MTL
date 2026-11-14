@@ -138,16 +138,14 @@
     //  vertical  = stack pages top-to-bottom into one tall PNG
     //  horizontal= lay pages side-by-side into one wide PNG
     //
-    //  Stitching is lossless (PNG, drawImage copies pixels verbatim). Text
-    //  boxes stay in their original per-page coordinates; each page gets a
-    //  stitchedOffset so the viewer / TypeR importer can place boxes on the
-    //  stitched image at the right spot:
-    //     absX = box.x * (canvasW / natW) + stitchedOffset.x
-    //     absY = box.y * (canvasH / natH) + stitchedOffset.y
+    //  Stitching is lossless (PNG, drawImage copies pixels verbatim). Every
+    //  stitched image becomes one ordinary exported page. During ZIP creation,
+    //  each source page's text boxes are translated into that image's coordinate
+    //  space and combined into one pages[] entry. TypeR therefore needs no
+    //  stitchedOffset support or second coordinate-conversion pass.
     //
-    //  If the chapter is too big for one canvas (> maxStitchPixels), we split
-    //  it into multiple stitched images and the manifest records which one
-    //  each page belongs to.
+    //  If the chapter is too big for one canvas (> maxStitchPixels), it is split
+    //  into multiple stitched images, each exported as its own numbered page.
     // ------------------------------------------------------------------
     function getStitchMode() {
         try {
@@ -563,11 +561,10 @@
     // bigger than the browser's canvas limit). Returns an array of
     // { canvas, offsets, width, height, pageIndices } chunks.
     //
-    // offsets[i] is the (x, y) position of page pageIndices[i] inside the
-    // chunk's canvas, measured in the canvas's own pixels. The manifest's
-    // boxes stay in source-image pixels, so the consumer converts:
-    //    absX = box.x * (canvasW / natW) + offset.x
-    //    absY = box.y * (canvasH / natH) + offset.y
+    // offsets[i] is the (x, y) position of source page pageIndices[i] inside
+    // the chunk canvas, measured in output pixels. buildZip uses these offsets
+    // to rewrite every text box into the final page coordinate space before
+    // writing chapter.json.
     //
     // PNG stitching is lossless: drawImage copies pixels verbatim, and we
     // toBlob('image/png') the result, so no re-compression happens.
